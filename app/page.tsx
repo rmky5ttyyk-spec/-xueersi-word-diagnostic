@@ -26,7 +26,7 @@ const baseQuestions: Question[] = [
   { word:"instead", prompt:"Tom stayed home ___ of going out in the rain.", options:["instead","inside","indeed","including"], answer:"instead", kind:"context", level:2 },
   { word:"unless", prompt:"You will miss the bus ___ you leave now.", options:["unless","because","although","while"], answer:"unless", kind:"context", level:3 },
   { word:"receive", prompt:"I was happy to ___ a letter from my friend.", options:["receive","accept","borrow","lend"], answer:"receive", kind:"confusing", level:2 },
-  { word:"advice", prompt:"My teacher gave me some useful ___.", options:["advice","advise","informationS","suggest"], answer:"advice", kind:"confusing", level:3 },
+  { word:"advice", prompt:"My teacher gave me some useful ___.", options:["advice","advises","informations","suggest"], answer:"advice", kind:"confusing", level:3 },
   { word:"spent", prompt:"Lily ___ two hours finishing her homework.", options:["spent","cost","took","paid"], answer:"spent", kind:"confusing", level:3 },
   { word:"hardly", prompt:"He was so tired that he could ___ keep his eyes open.", options:["hardly","hard","nearly","mostly"], answer:"hardly", kind:"context", level:3 },
 ];
@@ -65,6 +65,8 @@ function BrandLogo({compact=false}:{compact?:boolean}){return <img className={co
 
 function seededShuffle<T>(items:T[],seed:number){const list=[...items];let s=seed||1;for(let i=list.length-1;i>0;i--){s=(s*9301+49297)%233280;const j=Math.floor(s/233280*(i+1));[list[i],list[j]]=[list[j],list[i]]}return list}
 function isCorrectAnswer(q:Question,option:string){return option===q.answer||(q.accepted||[]).includes(option)}
+function initialLevelForGrade(grade:string){return ["五年级","六年级"].includes(grade)?1:grade==="初三"?3:2}
+function adaptiveState(rows:{correct:boolean}[],initial:number){let level=initial;let correct=0;let wrong=0;for(const row of rows){if(row.correct){correct+=1;wrong=0}else{wrong+=1;correct=0}if(correct>=2){level=Math.min(3,level+1);correct=0}if(wrong>=2){level=Math.max(1,level-1);wrong=0}}return {level,streak:{correct,wrong}}}
 function buildQuestions(grade:string,seed:number){
   const elementary=testableVocabulary.filter(x=>x.elementary&&x.word.length>=4);
   const middle=testableVocabulary.filter(x=>!x.elementary&&x.word.length>=5);
@@ -73,8 +75,9 @@ function buildQuestions(grade:string,seed:number){
   const baseSpelling=new Set(baseQuestions.filter(q=>q.kind==="spelling").map(q=>q.word));
   const spelling=seededShuffle(spellingQuestionBank.filter(q=>!baseSpelling.has(q.word)),seed+31).slice(0,20).map((q,i)=>({...q,options:seededShuffle(q.options.filter(o=>o===q.answer||!(q.accepted||[]).includes(o)),seed+i)}));
   const audioPool=audioReadyWords.map(word=>testableVocabulary.find(x=>x.word.toLowerCase()===word.toLowerCase())).filter(Boolean) as typeof testableVocabulary;
-  const listening=seededShuffle(audioPool,seed+73).slice(0,20).map((x,i)=>{const distractors=seededShuffle(audioPool.filter(y=>y.word!==x.word&&Math.abs(y.word.length-x.word.length)<=3),seed+i+80).slice(0,3).map(y=>y.word);return {word:x.word,prompt:"点击播放真人词典发音后，选择你听到的单词",options:seededShuffle([x.word,...distractors],seed+i+120),answer:x.word,kind:"listening" as Kind,level:x.elementary?1:(x.word.length>8?3:2)}});
-  return seededShuffle([...baseQuestions,...spelling,...listening],seed+999).slice(0,60);
+  const listening=seededShuffle(audioPool,seed+73).slice(0,20).map((x,i)=>{const first=x.word[0].toLowerCase();const sameInitial=Array.from(new Map(testableVocabulary.filter(y=>y.word.toLowerCase()!==x.word.toLowerCase()&&y.word[0].toLowerCase()===first).map(y=>[y.word.toLowerCase(),y])).values());const distractors=seededShuffle(sameInitial,seed+i+80).sort((a,b)=>Math.abs(a.word.length-x.word.length)-Math.abs(b.word.length-x.word.length)).slice(0,3).map(y=>y.word);return {word:x.word,prompt:"听音完成句子：I heard the word ___ clearly.",options:seededShuffle([x.word,...distractors],seed+i+120),answer:x.word,kind:"listening" as Kind,level:x.elementary?1:(x.word.length>8?3:2)}});
+  const unique=new Map<string,Question>();for(const question of [...baseQuestions,...spelling,...listening]){const key=`${question.kind}|${question.word.toLowerCase()}|${question.prompt}`;if(!unique.has(key))unique.set(key,question)}
+  return seededShuffle([...unique.values()],seed+999).slice(0,60);
 }
 
 export default function Home(){
@@ -88,6 +91,7 @@ export default function Home(){
   const [questions,setQuestions] = useState<Question[]>(()=>buildQuestions(profile.grade,testSeed));
   const [adaptiveLevel,setAdaptiveLevel] = useState(2);
   const [streak,setStreak] = useState({correct:0,wrong:0});
+  const [remainingSeconds,setRemainingSeconds] = useState(15*60);
   const result = useMemo(()=>{
     const total = Math.max(answers.length,1); const correct = answers.filter(a=>a.correct).length;
     const rate = Math.round(correct/total*100);
@@ -100,8 +104,10 @@ export default function Home(){
   },[answers]);
 
   useEffect(()=>{ try{setRecords(JSON.parse(localStorage.getItem("word-diagnostic-records")||"[]"));}catch{} },[]);
+  useEffect(()=>{if(phase!=="test"||remainingSeconds<=0)return;const timer=window.setTimeout(()=>setRemainingSeconds(seconds=>seconds-1),1000);return()=>window.clearTimeout(timer)},[phase,remainingSeconds]);
+  useEffect(()=>{if(phase==="test"&&remainingSeconds===0){setPhase("gate");window.scrollTo(0,0)}},[phase,remainingSeconds]);
   const start=()=>{setAnswers([]);setIndex(0);setPhase("profile");window.scrollTo(0,0)};
-  const beginTest=()=>{const seed=Date.now()%1000000;const initial=["五年级","六年级"].includes(profile.grade)?1:profile.grade==="初三"?3:2;setTestSeed(seed);setQuestions(buildQuestions(profile.grade,seed));setAdaptiveLevel(initial);setStreak({correct:0,wrong:0});setIndex(0);setAnswers([]);setPhase("test")};
+  const beginTest=()=>{const seed=Date.now()%1000000;const initial=initialLevelForGrade(profile.grade);setTestSeed(seed);setQuestions(buildQuestions(profile.grade,seed));setAdaptiveLevel(initial);setStreak({correct:0,wrong:0});setRemainingSeconds(15*60);setIndex(0);setAnswers([]);setPhase("test")};
   const choose=(option:string)=>{
     const q=questions[index]; const correct=isCorrectAnswer(q,option); const next=[...answers,{q,chosen:option,correct}]; setAnswers(next);
     const nextStreak={correct:correct?streak.correct+1:0,wrong:correct?0:streak.wrong+1};let target=adaptiveLevel;
@@ -110,6 +116,7 @@ export default function Home(){
     setStreak(nextStreak);setAdaptiveLevel(target);
     if(index===questions.length-1){setPhase("gate");} else {setQuestions(current=>{const copy=[...current];const match=copy.findIndex((item,i)=>i>index&&item.level===target);if(match>index+1)[copy[index+1],copy[match]]=[copy[match],copy[index+1]];return copy});setIndex(index+1)}
   };
+  const previousQuestion=()=>{if(index===0)return;const previousAnswers=answers.slice(0,-1);const state=adaptiveState(previousAnswers,initialLevelForGrade(profile.grade));setAnswers(previousAnswers);setAdaptiveLevel(state.level);setStreak(state.streak);setIndex(current=>Math.max(0,current-1));window.scrollTo(0,0)};
   const speak=()=>{const audio=new Audio("/api/pronunciation?word="+encodeURIComponent(questions[index].word));audio.play().catch(()=>alert("真人发音暂时加载失败，请检查网络后重试。"))};
   const unlock=async()=>{
     if(!/^1\d{10}$/.test(profile.phone)) return;
@@ -123,7 +130,7 @@ export default function Home(){
     }finally{setSaving(false);setPhase("result");window.scrollTo(0,0)}
   };
 
-  if(phase==="test") return <TestPage q={questions[index]} index={index} total={questions.length} adaptiveLevel={adaptiveLevel} choose={choose} speak={speak} onExit={()=>setPhase("home")}/>;
+  if(phase==="test") return <TestPage q={questions[index]} index={index} total={questions.length} adaptiveLevel={adaptiveLevel} remainingSeconds={remainingSeconds} choose={choose} speak={speak} previous={previousQuestion} onExit={()=>setPhase("home")}/>;
   if(phase==="gate") return <Gate profile={profile} setProfile={setProfile} result={result} unlock={unlock} saving={saving} onBack={()=>setPhase("home")}/>;
   if(phase==="result") return <Result profile={profile} result={result} restart={start}/>;
   if(phase==="admin") return <Admin localRecords={records} onBack={()=>setPhase("home")}/>;
@@ -149,7 +156,7 @@ function ProfilePage({profile,setProfile,submit,back}:{profile:Profile;setProfil
 
 function FlowHeader({back}:{back:()=>void}){return <header className="flow-header"><button onClick={back}>← 返回</button><BrandLogo compact/><small>约15分钟完成</small></header>}
 
-function TestPage({q,index,total,adaptiveLevel,choose,speak,onExit}:{q:Question;index:number;total:number;adaptiveLevel:number;choose:(s:string)=>void;speak:()=>void;onExit:()=>void}){return <main className="test-page"><FlowHeader back={onExit}/><div className="progress-head"><span>{labels[q.kind]} · 自适应难度 {adaptiveLevel}/3</span><b>{index+1} <small>/ {total}</small></b></div><div className="progress"><i style={{width:((index+1)/total*100)+'%'}}/></div><section className="question-card" key={q.word+"-"+index}><div className="adaptive-note">系统正根据前序答题表现动态调整下一题难度</div><div className="qtype"><i>{icons[q.kind]}</i>{labels[q.kind]}</div><h1>{q.prompt}</h1>{q.kind==="listening"&&<button className="audio" onClick={speak}>▶ 播放单词发音</button>}<div className="answers">{q.options.map((o,i)=><button key={q.word+"-"+o} onClick={e=>{e.currentTarget.blur();choose(o)}}><span>{String.fromCharCode(65+i)}</span>{o}</button>)}</div><p className="tip">请凭第一感觉作答，不确定也没关系</p></section></main>}
+function TestPage({q,index,total,adaptiveLevel,remainingSeconds,choose,speak,previous,onExit}:{q:Question;index:number;total:number;adaptiveLevel:number;remainingSeconds:number;choose:(s:string)=>void;speak:()=>void;previous:()=>void;onExit:()=>void}){const minutes=String(Math.floor(remainingSeconds/60)).padStart(2,"0");const seconds=String(remainingSeconds%60).padStart(2,"0");return <main className="test-page"><FlowHeader back={onExit}/><div className="test-toolbar"><button className="previous-question" disabled={index===0} onClick={previous}>← 修改上一题</button><div className={remainingSeconds<=180?"countdown urgent":"countdown"}><small>剩余时间</small><b>{minutes}:{seconds}</b></div></div><div className="progress-head"><span>{labels[q.kind]} · 自适应难度 {adaptiveLevel}/3</span><b>{index+1} <small>/ {total}</small></b></div><div className="progress"><i style={{width:((index+1)/total*100)+'%'}}/></div><section className="question-card" key={q.word+"-"+index}><div className="adaptive-note">系统正根据前序答题表现动态调整下一题难度</div><div className="qtype"><i>{icons[q.kind]}</i>{labels[q.kind]}</div><h1>{q.prompt}</h1>{q.kind==="listening"&&<button className="audio" onClick={speak}>▶ 播放单词发音</button>}<div className="answers">{q.options.map((o,i)=><button key={q.word+"-"+o} onClick={e=>{e.currentTarget.blur();choose(o)}}><span>{String.fromCharCode(65+i)}</span>{o}</button>)}</div><p className="tip">请凭第一感觉作答，不确定也没关系</p></section></main>}
 
 function Gate({profile,setProfile,result,unlock,saving,onBack}:{profile:Profile;setProfile:(p:Profile)=>void;result:any;unlock:()=>void;saving:boolean;onBack:()=>void}){const valid=/^1\d{10}$/.test(profile.phone);return <main className="gate-page"><FlowHeader back={onBack}/><section className="gate-card"><div className="test-warning">内部测试：请填写测试手机号，暂勿录入真实家长信息</div><div className="success-check">✓</div><span>测试已完成</span><h1>{profile.name}的基础诊断已生成</h1><div className="teaser"><div><small>答题正确率</small><b>{result.rate}%</b></div><div><small>预计掌握范围</small><b>{Math.max(300,result.estimate-100)}—{result.estimate+100}词</b></div><div className="locked">🔒 五维分析、完整错词与学习建议待解锁</div></div><h2>输入测试手机号，查看完整报告</h2><p>内部体验数据将集中保存，方便统一验证后台流程</p><input className="phone" inputMode="numeric" maxLength={11} value={profile.phone} onChange={e=>setProfile({...profile,phone:e.target.value.replace(/\D/g,"")})} placeholder="例如：13800000001"/><button className="primary full" disabled={!valid||saving} onClick={unlock}>{saving?"正在保存…":"解锁完整报告 →"}</button><small className="privacy">内部测试数据将在验证结束后统一清理</small></section></main>}
 
