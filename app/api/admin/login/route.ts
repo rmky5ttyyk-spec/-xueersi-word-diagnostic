@@ -1,0 +1,2 @@
+import { expectedSession, passwordMatches, sessionCookie } from "../../adminAuth";
+export async function POST(request:Request){try{const {password}=await request.json() as {password?:string};if(!await passwordMatches(String(password||"")))return Response.json({error:"密码不正确"},{status:401});return Response.json({ok:true},{headers:{"Set-Cookie":sessionCookie(await expectedSession())}})}catch(error){return Response.json({error:error instanceof Error?error.message:"登录失败"},{status:500})}}

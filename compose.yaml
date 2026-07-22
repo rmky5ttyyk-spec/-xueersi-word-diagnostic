@@ -1,0 +1,15 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      DATABASE_PATH: /app/data/diagnostics.db
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - diagnostic-data:/app/data
+
+volumes:
+  diagnostic-data:
