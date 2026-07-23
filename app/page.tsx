@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { courseVocabulary, diagnosticVocabulary, pepVocabulary, testableVocabulary } from "./data/courseVocabulary";
 
 type Phase = "home" | "profile" | "test" | "gate" | "result" | "admin";
@@ -60,30 +60,51 @@ const spellingQuestionBank: Question[] = [
 
 const labels: Record<Kind,string> = { meaning:"词义理解", spelling:"拼写能力", listening:"听音辨词", context:"语境运用", confusing:"易混词辨析" };
 const icons: Record<Kind,string> = { meaning:"Aa", spelling:"✎", listening:"◉", context:"▤", confusing:"↔" };
-const audioReadyWords = ["weather","practice","improve","protect","environment","encourage","necessary","successful","difference","knowledge","comfortable","government","development","responsibility","especially","instead","unless","healthy","important","possible","popular","language","future","student","teacher","friend","morning","holiday","journey","answer","special","English","experience","excellent","expensive","favourite","festival","friendly","geography","honest","include","information","inside","international","interview","invite","island","library","medicine","museum","opinion","passage","perfect","prepare","problem","programme","progress","pronounce","provide","public","really","reason","recommend","relationship","research","respect","society","theatre","traffic","tradition","travel","village","volunteer","whether","wonderful"];
 function BrandLogo({compact=false}:{compact?:boolean}){return <img className={compact?"brand-logo-only compact":"brand-logo-only"} src="/brand/xueersi-peiyou-transparent.png" alt="学而思培优 Logo"/>}
 
 function seededShuffle<T>(items:T[],seed:number){const list=[...items];let s=seed||1;for(let i=list.length-1;i>0;i--){s=(s*9301+49297)%233280;const j=Math.floor(s/233280*(i+1));[list[i],list[j]]=[list[j],list[i]]}return list}
 function isCorrectAnswer(q:Question,option:string){return option===q.answer||(q.accepted||[]).includes(option)}
 function initialLevelForGrade(grade:string){return ["五年级","六年级"].includes(grade)?1:grade==="初三"?3:2}
 function adaptiveState(rows:{correct:boolean}[],initial:number){let level=initial;let correct=0;let wrong=0;for(const row of rows){if(row.correct){correct+=1;wrong=0}else{wrong+=1;correct=0}if(correct>=2){level=Math.min(3,level+1);correct=0}if(wrong>=2){level=Math.max(1,level-1);wrong=0}}return {level,streak:{correct,wrong}}}
+function spellingOptions(word:string,seed:number){
+  const lower=word.toLowerCase();
+  const middle=Math.max(1,Math.floor(lower.length/2));
+  const vowelIndex=[...lower].findIndex((char,index)=>index>0&&"aeiou".includes(char));
+  const candidates=[
+    lower.slice(0,middle)+lower.slice(middle+1),
+    lower.slice(0,middle)+lower[middle]+lower.slice(middle),
+    lower.slice(0,middle-1)+lower[middle]+lower[middle-1]+lower.slice(middle+1),
+    vowelIndex>0?lower.slice(0,vowelIndex)+({a:"e",e:"i",i:"e",o:"a",u:"o"} as Record<string,string>)[lower[vowelIndex]]+lower.slice(vowelIndex+1):lower+"e",
+  ];
+  const wrong=Array.from(new Set(candidates.filter(candidate=>candidate!==lower&&candidate.length>=3))).slice(0,3);
+  return wrong.length===3?seededShuffle([word,...wrong],seed):null;
+}
 function buildQuestions(grade:string,seed:number){
-  const audioPool=audioReadyWords.map(word=>testableVocabulary.find(x=>x.word.toLowerCase()===word.toLowerCase())).filter(Boolean) as typeof testableVocabulary;
+  const vocabulary=Array.from(new Map(testableVocabulary.map(item=>[item.word.toLowerCase(),item])).values());
+  const randomVocabulary=vocabulary.filter(item=>item.word===item.word.toLowerCase());
+  const vocabularyWords=new Set(vocabulary.map(item=>item.word.toLowerCase()));
   const questions:Question[]=[];
   const usedWords=new Set<string>();
   const addQuestion=(question:Question)=>{const key=question.word.toLowerCase();if(usedWords.has(key)||questions.length>=60)return false;usedWords.add(key);questions.push(question);return true};
 
-  seededShuffle(baseQuestions,seed+11).forEach(addQuestion);
-  seededShuffle(spellingQuestionBank,seed+31).forEach((question,i)=>addQuestion({...question,options:seededShuffle(question.options.filter(option=>option===question.answer||!(question.accepted||[]).includes(option)),seed+i+41)}));
+  const curated=seededShuffle([...baseQuestions,...spellingQuestionBank].filter(question=>vocabularyWords.has(question.word.toLowerCase())),seed+11);
+  curated.slice(0,18).forEach((question,i)=>addQuestion({...question,prompt:question.kind==="listening"?"请选择你听到的单词":question.prompt,options:seededShuffle(question.options.filter(option=>option===question.answer||!(question.accepted||[]).includes(option)),seed+i+31)}));
 
-  const gradeOffset=grade==="五年级"?0:grade==="六年级"?7:grade==="初一"?13:grade==="初二"?19:25;
-  seededShuffle(audioPool,seed+73+gradeOffset).forEach((word,i)=>{
+  const gradeOffset=grade==="五年级"?0:grade==="六年级"?137:grade==="初一"?271:grade==="初二"?409:557;
+  seededShuffle(randomVocabulary.filter(item=>item.word.length>=6),seed+53+gradeOffset).forEach((item,i)=>{
+    if(questions.length>=38||usedWords.has(item.word.toLowerCase()))return;
+    const options=spellingOptions(item.word,seed+i+67);
+    if(!options)return;
+    addQuestion({word:item.word,prompt:"下列哪项英文拼写正确？",options,answer:item.word,kind:"spelling",level:item.elementary?1:(item.word.length>=9?3:2)});
+  });
+
+  seededShuffle(randomVocabulary.filter(item=>item.word.length>=4),seed+73+gradeOffset).forEach((word,i)=>{
     if(questions.length>=60||usedWords.has(word.word.toLowerCase()))return;
     const first=word.word[0].toLowerCase();
-    const sameInitial=Array.from(new Map(testableVocabulary.filter(candidate=>candidate.word.toLowerCase()!==word.word.toLowerCase()&&candidate.word[0].toLowerCase()===first).map(candidate=>[candidate.word.toLowerCase(),candidate])).values());
+    const sameInitial=randomVocabulary.filter(candidate=>candidate.word.toLowerCase()!==word.word.toLowerCase()&&candidate.word[0].toLowerCase()===first);
     const distractors=seededShuffle(sameInitial,seed+i+80).sort((a,b)=>Math.abs(a.word.length-word.word.length)-Math.abs(b.word.length-word.word.length)).slice(0,3).map(candidate=>candidate.word);
     if(distractors.length<3)return;
-    addQuestion({word:word.word,prompt:"点击播放后，选择你听到的单词",options:seededShuffle([word.word,...distractors],seed+i+120),answer:word.word,kind:"listening",level:word.elementary?1:(word.word.length>8?3:2)});
+    addQuestion({word:word.word,prompt:"请选择你听到的单词",options:seededShuffle([word.word,...distractors],seed+i+120),answer:word.word,kind:"listening",level:word.elementary?1:(word.word.length>8?3:2)});
   });
 
   return seededShuffle(questions,seed+999).slice(0,60);
@@ -101,6 +122,7 @@ export default function Home(){
   const [adaptiveLevel,setAdaptiveLevel] = useState(2);
   const [streak,setStreak] = useState({correct:0,wrong:0});
   const [remainingSeconds,setRemainingSeconds] = useState(15*60);
+  const audioCache=useRef(new Map<string,HTMLAudioElement>());
   const result = useMemo(()=>{
     const total = Math.max(answers.length,1); const correct = answers.filter(a=>a.correct).length;
     const rate = Math.round(correct/total*100);
@@ -115,6 +137,7 @@ export default function Home(){
   useEffect(()=>{ try{setRecords(JSON.parse(localStorage.getItem("word-diagnostic-records")||"[]"));}catch{} },[]);
   useEffect(()=>{if(phase!=="test"||remainingSeconds<=0)return;const timer=window.setTimeout(()=>setRemainingSeconds(seconds=>seconds-1),1000);return()=>window.clearTimeout(timer)},[phase,remainingSeconds]);
   useEffect(()=>{if(phase==="test"&&remainingSeconds===0){setPhase("gate");window.scrollTo(0,0)}},[phase,remainingSeconds]);
+  useEffect(()=>{if(phase!=="test")return;questions.slice(index,index+4).filter(question=>question.kind==="listening").forEach(question=>{const key=question.word.toLowerCase();if(audioCache.current.has(key))return;const audio=new Audio("/api/pronunciation?word="+encodeURIComponent(question.word));audio.preload="auto";audio.playbackRate=1.12;audio.load();audioCache.current.set(key,audio)})},[phase,index,questions]);
   const start=()=>{setAnswers([]);setIndex(0);setPhase("profile");window.scrollTo(0,0)};
   const beginTest=()=>{const seed=Date.now()%1000000;const initial=initialLevelForGrade(profile.grade);setTestSeed(seed);setQuestions(buildQuestions(profile.grade,seed));setAdaptiveLevel(initial);setStreak({correct:0,wrong:0});setRemainingSeconds(15*60);setIndex(0);setAnswers([]);setPhase("test")};
   const choose=(option:string)=>{
@@ -126,7 +149,7 @@ export default function Home(){
     if(index===questions.length-1){setPhase("gate");} else {setQuestions(current=>{const copy=[...current];const match=copy.findIndex((item,i)=>i>index&&item.level===target);if(match>index+1)[copy[index+1],copy[match]]=[copy[match],copy[index+1]];return copy});setIndex(index+1)}
   };
   const previousQuestion=()=>{if(index===0)return;const previousAnswers=answers.slice(0,-1);const state=adaptiveState(previousAnswers,initialLevelForGrade(profile.grade));setAnswers(previousAnswers);setAdaptiveLevel(state.level);setStreak(state.streak);setIndex(current=>Math.max(0,current-1));window.scrollTo(0,0)};
-  const speak=()=>{const audio=new Audio("/api/pronunciation?word="+encodeURIComponent(questions[index].word));audio.play().catch(()=>alert("真人发音暂时加载失败，请检查网络后重试。"))};
+  const speak=()=>{const question=questions[index];const key=question.word.toLowerCase();let audio=audioCache.current.get(key);if(!audio){audio=new Audio("/api/pronunciation?word="+encodeURIComponent(question.word));audio.preload="auto";audioCache.current.set(key,audio)}audio.pause();audio.currentTime=0;audio.playbackRate=1.12;audio.play().catch(()=>alert("真人发音暂时加载失败，请检查网络后重试。"))};
   const unlock=async()=>{
     if(!/^1\d{10}$/.test(profile.phone)) return;
     setSaving(true);
@@ -145,7 +168,7 @@ export default function Home(){
   if(phase==="admin") return <Admin localRecords={records} onBack={()=>setPhase("home")}/>;
   if(phase==="profile") return <ProfilePage profile={profile} setProfile={setProfile} submit={beginTest} back={()=>setPhase("home")}/>;
 
-  return <main className="site-shell"><div className="internal-banner">完成词汇诊断后，填写家长手机号领取完整报告</div>
+  return <main className="site-shell">
     <nav className="nav"><button className="brand" onClick={()=>setPhase("home")} aria-label="返回学而思词汇诊断首页"><BrandLogo/></button><div className="navlinks"><a href="#why">产品介绍</a><a href="#method">如何测试</a><a href="#report">诊断报告</a></div><button className="admin-link" onClick={()=>setPhase("admin")}>老师后台</button></nav>
     <section className="hero">
       <div className="hero-copy"><div className="eyebrow">小学高年级—初三 · 免费测评</div><h1>中考1800词<br/><em>词汇能力诊断</em></h1><p>15分钟测出孩子<strong>会多少、忘在哪、该怎么补</strong></p><button className="primary" onClick={start}>免费开始测试 <span>→</span></button><div className="trust-row"><span>▤ 60道自适应题</span><span>◇ 五维能力分析</span><span>▣ 三节课·6小时短期班</span></div><div className="standard-note">词库构成：教育部2022课标 {courseVocabulary.length} 项必会词条 + 北京人教版教材 {pepVocabulary.length} 项拓展词条</div></div>
