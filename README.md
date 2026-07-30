@@ -1,5 +1,28 @@
 # vinext-starter
 
+## Pronunciation audio
+
+The listening test uses three layers so playback remains available:
+
+1. approved MP3 files in `public/audio/pronunciations/<word>.mp3`;
+2. remotely resolved dictionary audio, cached to disk after the first successful request;
+3. the device's English system voice when the network audio cannot be loaded.
+
+Set `PRONUNCIATION_CACHE_DIR` to a persistent, writable server directory in
+production. Only add Cambridge, textbook, or other publisher recordings when
+you have permission to redistribute them.
+
+After the production service is running, prewarm the complete testable
+vocabulary so normal tests do not need to wait for first-use downloads:
+
+```bash
+PRONUNCIATION_BASE_URL=http://127.0.0.1:3000 npm run audio:prewarm
+```
+
+The command writes unavailable words to `pronunciation-missing.txt`. Add an
+approved MP3 for each missing word under `public/audio/pronunciations/`, then
+rebuild and restart the service.
+
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
 Drizzle support.

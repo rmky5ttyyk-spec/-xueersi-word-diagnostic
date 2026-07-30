@@ -11,7 +11,7 @@ ENV_FILE="/etc/xueersi-word-diagnostic.env"
 SERVICE_FILE="/etc/systemd/system/xueersi-word-diagnostic.service"
 NGINX_FILE="/etc/nginx/sites-available/xueersi-word-diagnostic"
 
-echo "[1/6] 安装 Node.js、Nginx 与构建工具"
+echo "[1/7] 安装 Node.js、Nginx 与构建工具"
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm nginx curl openssl build-essential python3
 
@@ -22,12 +22,12 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
   exit 1
 fi
 
-echo "[2/6] 安装项目依赖"
+echo "[2/7] 安装项目依赖"
 cd "$APP_DIR"
 npm config set registry https://registry.npmmirror.com
 npm ci
 
-echo "[3/6] 构建网站"
+echo "[3/7] 构建网站"
 npm run build
 mkdir -p "$APP_DIR/data"
 
@@ -41,11 +41,16 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "密码格式不符合要求，请重新输入。"
   done
   umask 077
-  printf 'ADMIN_PASSWORD=%s\nDATABASE_PATH=%s/data/diagnostics.db\nCOOKIE_SECURE=false\n' "$ADMIN_PASSWORD" "$APP_DIR" > "$ENV_FILE"
+  printf 'ADMIN_PASSWORD=%s\nDATABASE_PATH=%s/data/diagnostics.db\nPRONUNCIATION_CACHE_DIR=/opt/xueersi-audio-cache\nCOOKIE_SECURE=false\n' "$ADMIN_PASSWORD" "$APP_DIR" > "$ENV_FILE"
   unset ADMIN_PASSWORD
 fi
 
-echo "[4/6] 配置网站服务"
+if ! grep -q '^PRONUNCIATION_CACHE_DIR=' "$ENV_FILE"; then
+  printf '\nPRONUNCIATION_CACHE_DIR=/opt/xueersi-audio-cache\n' >> "$ENV_FILE"
+fi
+mkdir -p /opt/xueersi-audio-cache
+
+echo "[4/7] 配置网站服务"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Xueersi Word Diagnostic
@@ -89,13 +94,16 @@ ln -sfn "$NGINX_FILE" /etc/nginx/sites-enabled/xueersi-word-diagnostic
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 
-echo "[5/6] 启动服务"
+echo "[5/7] 启动服务"
 systemctl daemon-reload
 systemctl enable --now xueersi-word-diagnostic
 systemctl enable --now nginx
 systemctl restart xueersi-word-diagnostic nginx
 
-echo "[6/6] 检查网站"
+echo "[6/7] 下载并核验本地发音库"
+PRONUNCIATION_BASE_URL=http://127.0.0.1:3000 PRONUNCIATION_PREWARM_CONCURRENCY=8 npm run audio:prewarm
+
+echo "[7/7] 检查网站"
 for _ in $(seq 1 30); do
   if curl -fsS http://127.0.0.1/ >/dev/null; then
     echo "部署成功：http://47.93.51.131"

@@ -2,7 +2,9 @@ node_modules/
 .next/
 .env
 /data/
+/.data/
 *.db
 *.db-shm
 *.db-wal
 npm-debug.log*
+pronunciation-missing.txt

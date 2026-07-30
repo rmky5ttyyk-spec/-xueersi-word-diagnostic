@@ -9,6 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "audio:prewarm": "node scripts/prewarm-pronunciations.mjs",
     "lint": "eslint . --ignore-pattern .next"
   },
   "dependencies": {

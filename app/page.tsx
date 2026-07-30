@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { courseVocabulary, diagnosticVocabulary, pepVocabulary, testableVocabulary } from "./data/courseVocabulary";
+import { normalizeMainlandMobile, validateMainlandMobile } from "./lib/phone";
 
 type Phase = "home" | "profile" | "test" | "gate" | "result" | "admin";
 type Kind = "meaning" | "spelling" | "listening" | "context" | "confusing";
@@ -66,6 +67,26 @@ function seededShuffle<T>(items:T[],seed:number){const list=[...items];let s=see
 function isCorrectAnswer(q:Question,option:string){return option===q.answer||(q.accepted||[]).includes(option)}
 function initialLevelForGrade(grade:string){return ["五年级","六年级"].includes(grade)?1:grade==="初三"?3:2}
 function adaptiveState(rows:{correct:boolean}[],initial:number){let level=initial;let correct=0;let wrong=0;for(const row of rows){if(row.correct){correct+=1;wrong=0}else{wrong+=1;correct=0}if(correct>=2){level=Math.min(3,level+1);correct=0}if(wrong>=2){level=Math.max(1,level-1);wrong=0}}return {level,streak:{correct,wrong}}}
+const wordFamilyAliases:Record<string,string>={
+  success:"success",
+  succeed:"success",
+  successful:"success",
+  successfully:"success",
+};
+function normalizedWordKey(word:string){return word.normalize("NFKC").trim().toLowerCase().replace(/[^a-z-]/g,"")}
+function wordFamilyKey(word:string){const key=normalizedWordKey(word);return wordFamilyAliases[key]||key}
+function uniqueQuestions(rows:Question[]){
+  const words=new Set<string>();
+  const families=new Set<string>();
+  return rows.filter(question=>{
+    const word=normalizedWordKey(question.word);
+    const family=wordFamilyKey(question.word);
+    if(!word||words.has(word)||families.has(family))return false;
+    words.add(word);
+    families.add(family);
+    return true;
+  });
+}
 function spellingOptions(word:string,seed:number){
   const lower=word.toLowerCase();
   const middle=Math.max(1,Math.floor(lower.length/2));
@@ -79,35 +100,74 @@ function spellingOptions(word:string,seed:number){
   const wrong=Array.from(new Set(candidates.filter(candidate=>candidate!==lower&&candidate.length>=3))).slice(0,3);
   return wrong.length===3?seededShuffle([word,...wrong],seed):null;
 }
-function buildQuestions(grade:string,seed:number){
-  const vocabulary=Array.from(new Map(testableVocabulary.map(item=>[item.word.toLowerCase(),item])).values());
+function buildQuestions(grade:string,seed:number,availableAudio?:Set<string>){
+  const vocabulary=Array.from(new Map(testableVocabulary.map(item=>[normalizedWordKey(item.word),item])).values());
   const randomVocabulary=vocabulary.filter(item=>item.word===item.word.toLowerCase());
-  const vocabularyWords=new Set(vocabulary.map(item=>item.word.toLowerCase()));
+  const vocabularyWords=new Set(vocabulary.map(item=>normalizedWordKey(item.word)));
   const questions:Question[]=[];
   const usedWords=new Set<string>();
-  const addQuestion=(question:Question)=>{const key=question.word.toLowerCase();if(usedWords.has(key)||questions.length>=60)return false;usedWords.add(key);questions.push(question);return true};
+  const usedFamilies=new Set<string>();
+  const addQuestion=(question:Question)=>{
+    const key=normalizedWordKey(question.word);
+    const family=wordFamilyKey(question.word);
+    if(!key||usedWords.has(key)||usedFamilies.has(family)||questions.length>=60)return false;
+    usedWords.add(key);
+    usedFamilies.add(family);
+    questions.push(question);
+    return true;
+  };
 
-  const curated=seededShuffle([...baseQuestions,...spellingQuestionBank].filter(question=>vocabularyWords.has(question.word.toLowerCase())),seed+11);
+  const curated=seededShuffle([...baseQuestions,...spellingQuestionBank].filter(question=>
+    vocabularyWords.has(normalizedWordKey(question.word))
+    &&(question.kind!=="listening"||!availableAudio||availableAudio.has(normalizedWordKey(question.word)))
+  ),seed+11);
   curated.slice(0,18).forEach((question,i)=>addQuestion({...question,prompt:question.kind==="listening"?"请选择你听到的单词":question.prompt,options:seededShuffle(question.options.filter(option=>option===question.answer||!(question.accepted||[]).includes(option)),seed+i+31)}));
 
   const gradeOffset=grade==="五年级"?0:grade==="六年级"?137:grade==="初一"?271:grade==="初二"?409:557;
   seededShuffle(randomVocabulary.filter(item=>item.word.length>=6),seed+53+gradeOffset).forEach((item,i)=>{
-    if(questions.length>=38||usedWords.has(item.word.toLowerCase()))return;
+    if(questions.length>=38||usedWords.has(normalizedWordKey(item.word))||usedFamilies.has(wordFamilyKey(item.word)))return;
     const options=spellingOptions(item.word,seed+i+67);
     if(!options)return;
     addQuestion({word:item.word,prompt:"下列哪项英文拼写正确？",options,answer:item.word,kind:"spelling",level:item.elementary?1:(item.word.length>=9?3:2)});
   });
 
-  seededShuffle(randomVocabulary.filter(item=>item.word.length>=4),seed+73+gradeOffset).forEach((word,i)=>{
-    if(questions.length>=60||usedWords.has(word.word.toLowerCase()))return;
+  const listeningVocabulary=randomVocabulary.filter(item=>item.word.length>=4&&(!availableAudio||availableAudio.has(normalizedWordKey(item.word))));
+  seededShuffle(listeningVocabulary,seed+73+gradeOffset).forEach((word,i)=>{
+    if(questions.length>=60||usedWords.has(normalizedWordKey(word.word))||usedFamilies.has(wordFamilyKey(word.word)))return;
     const first=word.word[0].toLowerCase();
-    const sameInitial=randomVocabulary.filter(candidate=>candidate.word.toLowerCase()!==word.word.toLowerCase()&&candidate.word[0].toLowerCase()===first);
+    const sameInitial=randomVocabulary.filter(candidate=>normalizedWordKey(candidate.word)!==normalizedWordKey(word.word)&&candidate.word[0].toLowerCase()===first);
     const distractors=seededShuffle(sameInitial,seed+i+80).sort((a,b)=>Math.abs(a.word.length-word.word.length)-Math.abs(b.word.length-word.word.length)).slice(0,3).map(candidate=>candidate.word);
     if(distractors.length<3)return;
     addQuestion({word:word.word,prompt:"请选择你听到的单词",options:seededShuffle([word.word,...distractors],seed+i+120),answer:word.word,kind:"listening",level:word.elementary?1:(word.word.length>8?3:2)});
   });
 
-  return seededShuffle(questions,seed+999).slice(0,60);
+  return uniqueQuestions(seededShuffle(questions,seed+999)).slice(0,60);
+}
+
+function speakWithDeviceVoice(word:string){
+  if(!("speechSynthesis" in window)||!("SpeechSynthesisUtterance" in window))return false;
+  const utterance=new SpeechSynthesisUtterance(word);
+  const voices=window.speechSynthesis.getVoices();
+  const preferredNames=["Daniel","Serena","Samantha","Google UK English Female","Microsoft Sonia"];
+  utterance.voice=preferredNames.map(name=>voices.find(voice=>voice.name.includes(name))).find(Boolean)
+    ||voices.find(voice=>voice.lang.toLowerCase()==="en-gb")
+    ||voices.find(voice=>voice.lang.toLowerCase().startsWith("en"))
+    ||null;
+  utterance.lang=utterance.voice?.lang||"en-GB";
+  utterance.rate=.9;
+  utterance.pitch=1;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+  return true;
+}
+
+function createPronunciationAudio(word:string,retry=false){
+  const suffix=retry?"&retry="+Date.now():"";
+  const audio=new Audio("/api/pronunciation?word="+encodeURIComponent(word)+suffix);
+  audio.preload="auto";
+  audio.playbackRate=1.12;
+  audio.load();
+  return audio;
 }
 
 export default function Home(){
@@ -122,6 +182,8 @@ export default function Home(){
   const [adaptiveLevel,setAdaptiveLevel] = useState(2);
   const [streak,setStreak] = useState({correct:0,wrong:0});
   const [remainingSeconds,setRemainingSeconds] = useState(15*60);
+  const [notice,setNotice] = useState<string|null>(null);
+  const [preparingAudio,setPreparingAudio] = useState(false);
   const audioCache=useRef(new Map<string,HTMLAudioElement>());
   const result = useMemo(()=>{
     const total = Math.max(answers.length,1); const correct = answers.filter(a=>a.correct).length;
@@ -137,9 +199,28 @@ export default function Home(){
   useEffect(()=>{ try{setRecords(JSON.parse(localStorage.getItem("word-diagnostic-records")||"[]"));}catch{} },[]);
   useEffect(()=>{if(phase!=="test"||remainingSeconds<=0)return;const timer=window.setTimeout(()=>setRemainingSeconds(seconds=>seconds-1),1000);return()=>window.clearTimeout(timer)},[phase,remainingSeconds]);
   useEffect(()=>{if(phase==="test"&&remainingSeconds===0){setPhase("gate");window.scrollTo(0,0)}},[phase,remainingSeconds]);
-  useEffect(()=>{if(phase!=="test")return;questions.slice(index,index+4).filter(question=>question.kind==="listening").forEach(question=>{const key=question.word.toLowerCase();if(audioCache.current.has(key))return;const audio=new Audio("/api/pronunciation?word="+encodeURIComponent(question.word));audio.preload="auto";audio.playbackRate=1.12;audio.load();audioCache.current.set(key,audio)})},[phase,index,questions]);
+  useEffect(()=>{if(phase!=="test")return;questions.slice(index,index+8).filter(question=>question.kind==="listening").forEach(question=>{const key=normalizedWordKey(question.word);if(audioCache.current.has(key))return;audioCache.current.set(key,createPronunciationAudio(question.word))})},[phase,index,questions]);
   const start=()=>{setAnswers([]);setIndex(0);setPhase("profile");window.scrollTo(0,0)};
-  const beginTest=()=>{const seed=Date.now()%1000000;const initial=initialLevelForGrade(profile.grade);setTestSeed(seed);setQuestions(buildQuestions(profile.grade,seed));setAdaptiveLevel(initial);setStreak({correct:0,wrong:0});setRemainingSeconds(15*60);setIndex(0);setAnswers([]);setPhase("test")};
+  const beginTest=async()=>{
+    if(preparingAudio)return;
+    setPreparingAudio(true);
+    try{
+      const response=await fetch("/api/pronunciation?manifest=1",{cache:"no-store"});
+      if(!response.ok)throw new Error("manifest unavailable");
+      const data=await response.json() as {words?:string[]};
+      const availableAudio=new Set((data.words||[]).map(normalizedWordKey));
+      if(availableAudio.size<60)throw new Error("audio library incomplete");
+      const seed=Date.now()%1000000;
+      const initial=initialLevelForGrade(profile.grade);
+      const nextQuestions=buildQuestions(profile.grade,seed,availableAudio);
+      if(nextQuestions.filter(question=>question.kind==="listening").length<10)throw new Error("not enough listening questions");
+      setTestSeed(seed);setQuestions(nextQuestions);setAdaptiveLevel(initial);setStreak({correct:0,wrong:0});setRemainingSeconds(15*60);setIndex(0);setAnswers([]);setPhase("test");
+    }catch{
+      setNotice("本地发音库正在准备中，请稍后再开始测试。");
+    }finally{
+      setPreparingAudio(false);
+    }
+  };
   const choose=(option:string)=>{
     const q=questions[index]; const correct=isCorrectAnswer(q,option); const next=[...answers,{q,chosen:option,correct}]; setAnswers(next);
     const nextStreak={correct:correct?streak.correct+1:0,wrong:correct?0:streak.wrong+1};let target=adaptiveLevel;
@@ -149,9 +230,34 @@ export default function Home(){
     if(index===questions.length-1){setPhase("gate");} else {setQuestions(current=>{const copy=[...current];const match=copy.findIndex((item,i)=>i>index&&item.level===target);if(match>index+1)[copy[index+1],copy[match]]=[copy[match],copy[index+1]];return copy});setIndex(index+1)}
   };
   const previousQuestion=()=>{if(index===0)return;const previousAnswers=answers.slice(0,-1);const state=adaptiveState(previousAnswers,initialLevelForGrade(profile.grade));setAnswers(previousAnswers);setAdaptiveLevel(state.level);setStreak(state.streak);setIndex(current=>Math.max(0,current-1));window.scrollTo(0,0)};
-  const speak=()=>{const question=questions[index];const key=question.word.toLowerCase();let audio=audioCache.current.get(key);if(!audio){audio=new Audio("/api/pronunciation?word="+encodeURIComponent(question.word));audio.preload="auto";audioCache.current.set(key,audio)}audio.pause();audio.currentTime=0;audio.playbackRate=1.12;audio.play().catch(()=>alert("真人发音暂时加载失败，请检查网络后重试。"))};
+  const speak=async()=>{
+    const question=questions[index];
+    const key=normalizedWordKey(question.word);
+    let audio=audioCache.current.get(key);
+    if(!audio){
+      audio=createPronunciationAudio(question.word);
+      audioCache.current.set(key,audio);
+    }
+    audio.pause();
+    audio.currentTime=0;
+    audio.playbackRate=1.12;
+    try{
+      await audio.play();
+    }catch{
+      audioCache.current.delete(key);
+      const retryAudio=createPronunciationAudio(question.word,true);
+      audioCache.current.set(key,retryAudio);
+      try{
+        await retryAudio.play();
+      }catch{
+        audioCache.current.delete(key);
+        if(!speakWithDeviceVoice(question.word))setNotice("发音服务暂时不可用，请稍后重试。");
+      }
+    }
+  };
   const unlock=async()=>{
-    if(!/^1\d{10}$/.test(profile.phone)) return;
+    const phoneCheck=validateMainlandMobile(profile.phone);
+    if(!phoneCheck.valid){setNotice(phoneCheck.message);return}
     setSaving(true);
     const record={id:Date.now(),date:new Date().toLocaleString("zh-CN"),...profile,estimate:result.estimate,rate:result.rate,type:labels[result.weakest],wrong:result.wrong.map(x=>x.q.word)};
     try{
@@ -162,11 +268,11 @@ export default function Home(){
     }finally{setSaving(false);setPhase("result");window.scrollTo(0,0)}
   };
 
-  if(phase==="test") return <TestPage q={questions[index]} index={index} total={questions.length} adaptiveLevel={adaptiveLevel} remainingSeconds={remainingSeconds} choose={choose} speak={speak} previous={previousQuestion} onExit={()=>setPhase("home")}/>;
+  if(phase==="test") return <TestPage q={questions[index]} index={index} total={questions.length} adaptiveLevel={adaptiveLevel} remainingSeconds={remainingSeconds} choose={choose} speak={speak} previous={previousQuestion} onExit={()=>setPhase("home")} notice={notice} dismissNotice={()=>setNotice(null)}/>;
   if(phase==="gate") return <Gate profile={profile} setProfile={setProfile} result={result} unlock={unlock} saving={saving} onBack={()=>setPhase("home")}/>;
   if(phase==="result") return <Result profile={profile} result={result} restart={start}/>;
   if(phase==="admin") return <Admin localRecords={records} onBack={()=>setPhase("home")}/>;
-  if(phase==="profile") return <ProfilePage profile={profile} setProfile={setProfile} submit={beginTest} back={()=>setPhase("home")}/>;
+  if(phase==="profile") return <ProfilePage profile={profile} setProfile={setProfile} submit={beginTest} back={()=>setPhase("home")} preparingAudio={preparingAudio} notice={notice} dismissNotice={()=>setNotice(null)}/>;
 
   return <main className="site-shell">
     <nav className="nav"><button className="brand" onClick={()=>setPhase("home")} aria-label="返回学而思词汇诊断首页"><BrandLogo/></button><div className="navlinks"><a href="#why">产品介绍</a><a href="#method">如何测试</a><a href="#report">诊断报告</a></div><button className="admin-link" onClick={()=>setPhase("admin")}>老师后台</button></nav>
@@ -184,14 +290,16 @@ export default function Home(){
 
 function ReportPreview(){const data=[82,68,76,72,64];return <div className="preview-wrap"><span className="float-letter a">A</span><span className="float-letter b">B</span><div className="report-card"><div className="report-top"><div><small>词汇能力诊断报告</small><h3>预计掌握 <b>1260</b> 词</h3></div><div className="ring">78<sup>分</sup></div></div><div className="chart-area"><div className="radar"><span>词义</span><span>拼写</span><span>听辨</span><span>语境</span><span>辨析</span><i></i></div><div className="bars">{data.map((v,i)=><div key={i}><p><span>{["词义理解","拼写能力","听音辨词","语境运用","易混辨析"][i]}</span><b>{v}</b></p><i><em style={{width:v+'%'}}></em></i></div>)}</div></div><div className="report-note"><span>● 当前水平</span><b>初二基础阶段</b><small>优先提升：拼写与易混词</small></div></div></div>}
 
-function ProfilePage({profile,setProfile,submit,back}:{profile:Profile;setProfile:(p:Profile)=>void;submit:()=>void;back:()=>void}){const update=(k:keyof Profile,v:string)=>setProfile({...profile,[k]:v});return <main className="flow-page"><FlowHeader back={back}/><div className="form-card"><div className="step-pill">第 1 步 / 共 2 步</div><h1>先了解一下孩子的学习情况</h1><p>这些信息会帮助我们生成更准确的诊断建议</p><label>孩子怎么称呼<input value={profile.name} onChange={e=>update("name",e.target.value)} placeholder="例如：小明"/></label><label>当前年级<div className="option-row">{["五年级","六年级","初一","初二","初三"].map(x=><button className={profile.grade===x?"selected":""} key={x} onClick={()=>update("grade",x)}>{x}</button>)}</div></label><div className="field-row"><label>最近英语成绩<input inputMode="numeric" value={profile.score} onChange={e=>update("score",e.target.value)} placeholder="例如：82"/></label><label>试卷满分<select value={profile.total} onChange={e=>update("total",e.target.value)}><option>100</option><option>120</option><option>150</option></select></label></div><label>目前背单词最大的困难<select value={profile.issue} onChange={e=>update("issue",e.target.value)}><option>背完容易忘</option><option>会认但不会拼</option><option>认识单词但不会做题</option><option>背得慢、效率低</option><option>缺少监督、无法坚持</option></select></label><button className="primary full" disabled={!profile.name||!profile.score} onClick={submit}>开始60题诊断 →</button></div></main>}
+function ProfilePage({profile,setProfile,submit,back,preparingAudio,notice,dismissNotice}:{profile:Profile;setProfile:(p:Profile)=>void;submit:()=>void;back:()=>void;preparingAudio:boolean;notice:string|null;dismissNotice:()=>void}){const update=(k:keyof Profile,v:string)=>setProfile({...profile,[k]:v});return <main className="flow-page"><FlowHeader back={back}/><div className="form-card"><div className="step-pill">第 1 步 / 共 2 步</div><h1>先了解一下孩子的学习情况</h1><p>这些信息会帮助我们生成更准确的诊断建议</p><label>孩子怎么称呼<input value={profile.name} onChange={e=>update("name",e.target.value)} placeholder="例如：小明"/></label><label>当前年级<div className="option-row">{["五年级","六年级","初一","初二","初三"].map(x=><button className={profile.grade===x?"selected":""} key={x} onClick={()=>update("grade",x)}>{x}</button>)}</div></label><div className="field-row"><label>最近英语成绩<input inputMode="numeric" value={profile.score} onChange={e=>update("score",e.target.value)} placeholder="例如：82"/></label><label>试卷满分<select value={profile.total} onChange={e=>update("total",e.target.value)}><option>100</option><option>120</option><option>150</option></select></label></div><label>目前背单词最大的困难<select value={profile.issue} onChange={e=>update("issue",e.target.value)}><option>背完容易忘</option><option>会认但不会拼</option><option>认识单词但不会做题</option><option>背得慢、效率低</option><option>缺少监督、无法坚持</option></select></label><button className="primary full" disabled={!profile.name||!profile.score||preparingAudio} onClick={submit}>{preparingAudio?"正在检查本地发音库…":"开始60题诊断 →"}</button></div>{notice&&<SiteNotice title="暂时无法开始" message={notice} onClose={dismissNotice}/>}</main>}
 
 function FlowHeader({back}:{back:()=>void}){return <header className="flow-header"><button onClick={back}>← 返回</button><BrandLogo compact/><small>约15分钟完成</small></header>}
 
-function TestPage({q,index,total,adaptiveLevel,remainingSeconds,choose,speak,previous,onExit}:{q:Question;index:number;total:number;adaptiveLevel:number;remainingSeconds:number;choose:(s:string)=>void;speak:()=>void;previous:()=>void;onExit:()=>void}){const minutes=String(Math.floor(remainingSeconds/60)).padStart(2,"0");const seconds=String(remainingSeconds%60).padStart(2,"0");return <main className="test-page"><FlowHeader back={onExit}/><div className="test-toolbar"><button className="previous-question" disabled={index===0} onClick={previous}>← 修改上一题</button><div className={remainingSeconds<=180?"countdown urgent":"countdown"}><small>剩余时间</small><b>{minutes}:{seconds}</b></div></div><div className="progress-head"><span>{labels[q.kind]} · 自适应难度 {adaptiveLevel}/3</span><b>{index+1} <small>/ {total}</small></b></div><div className="progress"><i style={{width:((index+1)/total*100)+'%'}}/></div><section className="question-card" key={q.word+"-"+index}><div className="adaptive-note">系统正根据前序答题表现动态调整下一题难度</div><div className="qtype"><i>{icons[q.kind]}</i>{labels[q.kind]}</div><h1>{q.prompt}</h1>{q.kind==="listening"&&<button className="audio" onClick={speak}>▶ 播放单词发音</button>}<div className="answers">{q.options.map((o,i)=><button key={q.word+"-"+o} onClick={e=>{e.currentTarget.blur();choose(o)}}><span>{String.fromCharCode(65+i)}</span>{o}</button>)}</div><p className="tip">请凭第一感觉作答，不确定也没关系</p></section></main>}
+function TestPage({q,index,total,adaptiveLevel,remainingSeconds,choose,speak,previous,onExit,notice,dismissNotice}:{q:Question;index:number;total:number;adaptiveLevel:number;remainingSeconds:number;choose:(s:string)=>void;speak:()=>void;previous:()=>void;onExit:()=>void;notice:string|null;dismissNotice:()=>void}){const minutes=String(Math.floor(remainingSeconds/60)).padStart(2,"0");const seconds=String(remainingSeconds%60).padStart(2,"0");return <main className="test-page"><FlowHeader back={onExit}/><div className="test-toolbar"><button className="previous-question" disabled={index===0} onClick={previous}>← 修改上一题</button><div className={remainingSeconds<=180?"countdown urgent":"countdown"}><small>剩余时间</small><b>{minutes}:{seconds}</b></div></div><div className="progress-head"><span>{labels[q.kind]} · 自适应难度 {adaptiveLevel}/3</span><b>{index+1} <small>/ {total}</small></b></div><div className="progress"><i style={{width:((index+1)/total*100)+'%'}}/></div><section className="question-card" key={q.word+"-"+index}><div className="adaptive-note">系统正根据前序答题表现动态调整下一题难度</div><div className="qtype"><i>{icons[q.kind]}</i>{labels[q.kind]}</div><h1>{q.prompt}</h1>{q.kind==="listening"&&<button className="audio" onClick={speak}>▶ 播放单词发音</button>}<div className="answers">{q.options.map((o,i)=><button key={q.word+"-"+o} onClick={e=>{e.currentTarget.blur();choose(o)}}><span>{String.fromCharCode(65+i)}</span>{o}</button>)}</div><p className="tip">请凭第一感觉作答，不确定也没关系</p></section>{notice&&<SiteNotice title="发音提示" message={notice} onClose={dismissNotice}/>}</main>}
 
-function Gate({profile,setProfile,result,unlock,saving,onBack}:{profile:Profile;setProfile:(p:Profile)=>void;result:any;unlock:()=>void;saving:boolean;onBack:()=>void}){const valid=/^1\d{10}$/.test(profile.phone);return <main className="gate-page"><FlowHeader back={onBack}/><section className="gate-card"><div className="success-check">✓</div><span>测试已完成</span><h1>{profile.name}的基础诊断已生成</h1><div className="teaser"><div><small>答题正确率</small><b>{result.rate}%</b></div><div><small>预计掌握范围</small><b>{Math.max(300,result.estimate-100)}—{result.estimate+100}词</b></div><div className="locked">🔒 五维分析、完整错词与学习建议待解锁</div></div><h2>填写家长真实手机号，查看完整报告</h2><p>老师将根据诊断结果提供报告解读和词汇提升建议</p><input className="phone" inputMode="numeric" autoComplete="tel" maxLength={11} value={profile.phone} onChange={e=>setProfile({...profile,phone:e.target.value.replace(/\D/g,"")})} placeholder="请输入家长手机号"/><button className="primary full" disabled={!valid||saving} onClick={unlock}>{saving?"正在保存…":"提交并查看完整报告 →"}</button><small className="privacy">手机号仅用于本次报告解读与课程咨询，我们会妥善保护您的信息</small></section></main>}
+function Gate({profile,setProfile,result,unlock,saving,onBack}:{profile:Profile;setProfile:(p:Profile)=>void;result:any;unlock:()=>void;saving:boolean;onBack:()=>void}){const phoneCheck=validateMainlandMobile(profile.phone);return <main className="gate-page"><FlowHeader back={onBack}/><section className="gate-card"><div className="success-check">✓</div><span>测试已完成</span><h1>{profile.name}的基础诊断已生成</h1><div className="teaser"><div><small>答题正确率</small><b>{result.rate}%</b></div><div><small>预计掌握范围</small><b>{Math.max(300,result.estimate-100)}—{result.estimate+100}词</b></div><div className="locked">🔒 五维分析、完整错词与学习建议待解锁</div></div><h2>填写家长真实手机号，查看完整报告</h2><p>老师将根据诊断结果提供报告解读和词汇提升建议</p><input className="phone" inputMode="numeric" autoComplete="tel" maxLength={11} value={profile.phone} onChange={e=>setProfile({...profile,phone:normalizeMainlandMobile(e.target.value)})} placeholder="请输入家长手机号"/>{profile.phone&&<small className={phoneCheck.valid?"phone-valid":"phone-error"}>{phoneCheck.valid?"✓ 手机号格式已通过校验":phoneCheck.message}</small>}<button className="primary full" disabled={!phoneCheck.valid||saving} onClick={unlock}>{saving?"正在保存…":"提交并查看完整报告 →"}</button><small className="privacy">手机号仅用于本次报告解读与课程咨询，我们会妥善保护您的信息</small></section></main>}
 
-function Result({profile,result,restart}:{profile:Profile;result:any;restart:()=>void}){const plans:Record<Kind,{type:string;focus:string;outcome:string}>={meaning:{type:"基础词义缺口型",focus:"高频词义与一词多义",outcome:"看到核心词能快速反应"},spelling:{type:"会认不会拼型",focus:"音节拆分与拼写规则",outcome:"把认识的词稳定写出来"},listening:{type:"音形脱节型",focus:"发音、词形双向绑定",outcome:"听到单词能准确识别"},context:{type:"会背不会用型",focus:"中考句型与语境搭配",outcome:"从背词迁移到做题"},confusing:{type:"易混辨析薄弱型",focus:"形近词与近义词对比",outcome:"减少选择题低级失分"}};const plan=plans[result.weakest as Kind];return <main className="result-page"><FlowHeader back={()=>location.reload()}/><section className="result-hero"><div><span>{profile.name}的专属报告</span><h1>中考1800词·词汇能力诊断</h1><p>{profile.grade} · 本次共完成60道自适应题</p></div><div className="estimate"><small>预计掌握中考核心词汇</small><b>{result.estimate}<em>词</em></b><span>预计范围 {Math.max(300,result.estimate-100)}—{result.estimate+100}词</span></div></section><section className="result-grid"><article className="ability-card"><div className="card-title"><div><span>五维能力分析</span><h2>优势清晰，短板也很明确</h2></div><b>{result.rate}<small>综合分</small></b></div>{(Object.keys(labels) as Kind[]).map((k,i)=><div className="ability-row" key={k}><i className={'c'+i}>{icons[k]}</i><span>{labels[k]}</span><div><em style={{width:result.scores[k]+'%'}}/></div><b>{result.scores[k]}</b></div>)}</article><article className="diagnosis-card"><span>核心诊断</span><h2>{labels[result.weakest as Kind]}是当前首要提升点</h2><p>孩子属于“{plan.type}”。建议优先训练{plan.focus}，目标是{plan.outcome}。</p><div className="action-list"><b>三节课·6小时短期提升重点</b><p>① 第1课（2小时）：定位词汇漏洞，建立音形义连接</p><p>② 第2课（2小时）：攻克拼写、词形变化与易混词</p><p>③ 第3课（2小时）：中考语境训练与阶段复测</p></div></article></section><section className="wrong-card"><div className="card-title"><div><span>本次代表性错词</span><h2>不是背得少，而是要练得更精准</h2></div><small>共 {60-result.correct} 题待巩固</small></div><div className="wrong-grid">{result.wrong.length?result.wrong.map((x:any,i:number)=><div key={i}><b>{x.q.word}</b><span>{labels[x.q.kind as Kind]}</span><small>你的答案：{x.chosen}</small><em>正确：{x.q.answer}</em></div>):<p>表现很棒，本次抽样题目全部答对！</p>}</div></section><section className="teacher-cta"><div><span>测评后匹配的短期提升班</span><h2>三节课·6小时词汇短期班</h2><p>围绕本次报告中的真实薄弱项，集中解决词义、拼写、听辨、语境和易混词问题。</p></div><button onClick={()=>alert("了解意向已记录，老师将通过预留手机号联系您。")}>点击了解短期班 →</button></section><button className="restart" onClick={restart}>重新测试</button></main>}
+function SiteNotice({title,message,onClose}:{title:string;message:string;onClose:()=>void}){return <div className="notice-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)onClose()}}><section className="site-notice" role="dialog" aria-modal="true" aria-labelledby="site-notice-title"><div className="notice-icon">i</div><span>词汇诊断</span><h2 id="site-notice-title">{title}</h2><p>{message}</p><button autoFocus onClick={onClose}>我知道了</button></section></div>}
+
+function Result({profile,result,restart}:{profile:Profile;result:any;restart:()=>void}){const [notice,setNotice]=useState(false);const plans:Record<Kind,{type:string;focus:string;outcome:string}>={meaning:{type:"基础词义缺口型",focus:"高频词义与一词多义",outcome:"看到核心词能快速反应"},spelling:{type:"会认不会拼型",focus:"音节拆分与拼写规则",outcome:"把认识的词稳定写出来"},listening:{type:"音形脱节型",focus:"发音、词形双向绑定",outcome:"听到单词能准确识别"},context:{type:"会背不会用型",focus:"中考句型与语境搭配",outcome:"从背词迁移到做题"},confusing:{type:"易混辨析薄弱型",focus:"形近词与近义词对比",outcome:"减少选择题低级失分"}};const plan=plans[result.weakest as Kind];return <main className="result-page"><FlowHeader back={()=>location.reload()}/><section className="result-hero"><div><span>{profile.name}的专属报告</span><h1>中考1800词·词汇能力诊断</h1><p>{profile.grade} · 本次共完成60道自适应题</p></div><div className="estimate"><small>预计掌握中考核心词汇</small><b>{result.estimate}<em>词</em></b><span>预计范围 {Math.max(300,result.estimate-100)}—{result.estimate+100}词</span></div></section><section className="result-grid"><article className="ability-card"><div className="card-title"><div><span>五维能力分析</span><h2>优势清晰，短板也很明确</h2></div><b>{result.rate}<small>综合分</small></b></div>{(Object.keys(labels) as Kind[]).map((k,i)=><div className="ability-row" key={k}><i className={'c'+i}>{icons[k]}</i><span>{labels[k]}</span><div><em style={{width:result.scores[k]+'%'}}/></div><b>{result.scores[k]}</b></div>)}</article><article className="diagnosis-card"><span>核心诊断</span><h2>{labels[result.weakest as Kind]}是当前首要提升点</h2><p>孩子属于“{plan.type}”。建议优先训练{plan.focus}，目标是{plan.outcome}。</p><div className="action-list"><b>三节课·6小时短期提升重点</b><p>① 第1课（2小时）：定位词汇漏洞，建立音形义连接</p><p>② 第2课（2小时）：攻克拼写、词形变化与易混词</p><p>③ 第3课（2小时）：中考语境训练与阶段复测</p></div></article></section><section className="wrong-card"><div className="card-title"><div><span>本次代表性错词</span><h2>不是背得少，而是要练得更精准</h2></div><small>共 {60-result.correct} 题待巩固</small></div><div className="wrong-grid">{result.wrong.length?result.wrong.map((x:any,i:number)=><div key={i}><b>{x.q.word}</b><span>{labels[x.q.kind as Kind]}</span><small>你的答案：{x.chosen}</small><em>正确：{x.q.answer}</em></div>):<p>表现很棒，本次抽样题目全部答对！</p>}</div></section><section className="teacher-cta"><div><span>测评后匹配的短期提升班</span><h2>三节课·6小时词汇短期班</h2><p>围绕本次报告中的真实薄弱项，集中解决词义、拼写、听辨、语境和易混词问题。</p></div><button onClick={()=>setNotice(true)}>点击了解短期班 →</button></section><button className="restart" onClick={restart}>重新测试</button>{notice&&<SiteNotice title="提交成功" message="了解意向已记录，老师将通过预留手机号联系您。" onClose={()=>setNotice(false)}/>}</main>}
 
 function Admin({localRecords,onBack}:{localRecords:any[];onBack:()=>void}){const [cloud,setCloud]=useState<any[]>([]);const [loading,setLoading]=useState(true);const [authed,setAuthed]=useState(false);const [password,setPassword]=useState("");const [error,setError]=useState("");const load=()=>fetch("/api/diagnostics").then(async r=>{if(!r.ok)throw new Error(String(r.status));const d=await r.json();setCloud(d.records||[]);setAuthed(true)}).finally(()=>setLoading(false));useEffect(()=>{load().catch(()=>setLoading(false))},[]);const updateStatus=async(id:number,followUpStatus:string)=>{const r=await fetch("/api/diagnostics",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,followUpStatus})});if(r.ok)setCloud(rows=>rows.map(x=>x.id===id?{...x,followUpStatus}:x))};const login=async()=>{setLoading(true);setError("");try{const r=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});if(!r.ok){const d=await r.json();throw new Error(d.error||"登录失败")}await load()}catch(e){setError(e instanceof Error?e.message:"登录失败");setLoading(false)}};if(!authed)return <main className="admin-login-page"><button className="login-back" onClick={onBack}>← 返回测试首页</button><section className="admin-login-card"><div className="login-lock">🔐</div><span>管理入口</span><h1>老师后台登录</h1><p>请输入后台专用密码查看手机号与诊断记录</p><input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="请输入后台密码" autoFocus/>{error&&<em>{error}</em>}<button className="primary full" disabled={!password||loading} onClick={login}>{loading?"正在验证…":"登录后台 →"}</button><small>登录状态将在8小时后自动失效</small></section></main>;const records=(cloud.length?cloud:localRecords).map(r=>r.studentName?{...r,name:r.studentName,score:r.recentScore,total:r.scoreTotal,estimate:r.estimatedVocabulary,rate:r.accuracyRate,type:r.weakestArea,date:r.createdAt}:r);const exportCsv=()=>{const heads=["学生","年级","手机号","成绩","预计词汇","正确率","薄弱点","跟进状态","提交时间"];const esc=(v:any)=>`"${String(v??"").replace(/"/g,'""')}"`;const rows=records.map(r=>[r.name,r.grade,r.phone,`${r.score}/${r.total}`,r.estimate,r.rate+"%",r.type,r.followUpStatus||"未跟进",r.date]);const blob=new Blob(["\ufeff"+[heads,...rows].map(row=>row.map(esc).join(",")).join("\n")],{type:"text/csv;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`词汇诊断线索-${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url)};return <main className="admin-page"><header><div><button onClick={onBack}>← 返回网站</button><h1>词汇诊断·老师后台</h1></div><div><span>累计记录 <b>{records.length}</b></span><button className="export-btn" disabled={!records.length} onClick={exportCsv}>导出CSV</button></div></header><section className="admin-stats"><div><span>云端记录</span><b>{loading?"…":records.length}</b></div><div><span>平均正确率</span><b>{records.length?Math.round(records.reduce((s,r)=>s+r.rate,0)/records.length):0}%</b></div><div><span>平均预计词汇</span><b>{records.length?Math.round(records.reduce((s,r)=>s+r.estimate,0)/records.length):0}</b></div></section><section className="table-card"><div className="table-title"><h2>集中诊断记录</h2><span>所有设备提交的数据统一显示在这里</span></div>{records.length?<div className="table-wrap"><table><thead><tr><th>学生</th><th>年级</th><th>家长手机号</th><th>英语成绩</th><th>预计词汇</th><th>正确率</th><th>首要薄弱点</th><th>跟进状态</th><th>提交时间</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td><b>{r.name}</b></td><td>{r.grade}</td><td>{r.phone}</td><td>{r.score}/{r.total}</td><td>{r.estimate}词</td><td>{r.rate}%</td><td><span className="tag">{r.type}</span></td><td><select className="status-select" value={r.followUpStatus||"未跟进"} onChange={e=>updateStatus(r.id,e.target.value)}>{["未跟进","已联系","待再次联系","已预约解读","已报名","暂无意向"].map(s=><option key={s}>{s}</option>)}</select></td><td>{r.date}</td></tr>)}</tbody></table></div>:<div className="empty"><b>暂无云端诊断记录</b><p>用户完成测试并提交手机号后，记录会显示在这里。</p></div>}</section></main>}
